@@ -23,37 +23,88 @@ io.on("connection", (socket) => {
     if (data.role === "operator") {
       operators.set(socket.id, { socket, name: data.name || "Operador" });
       console.log(`👨‍💼 Operador conectado: ${data.name}`);
-      socket.emit("serverMessage", { message: "Conectado como operador ✅" });
+      socket.emit("serverMessage", {
+        type: "text",
+        message: "Conectado como operador ✅",
+      });
     } else {
       clients.set(socket.id, { socket, username: data.user || "Anon" });
       console.log(`🙋 Cliente conectado: ${data.user}`);
       socket.emit("serverMessage", {
+        type: "text",
         message: "¡Bienvenido al chat de Ganamos!",
       });
 
-      // notify operators of new chat
-      io.emit("newChat", {
-        clientId: socket.id,
-        username: data.user,
-      });
+      // Notificar a los operadores del nuevo chat
+      for (const [_, op] of operators) {
+        op.socket.emit("newChat", {
+          clientId: socket.id,
+          username: data.user,
+        });
+      }
     }
   });
 
+  // 👉 Mensaje que viene del CLIENTE (texto o imagen)
   socket.on("clientMessage", (data) => {
-    console.log("💬 Mensaje cliente:", data.message);
-    // broadcast to all operators
-    for (const [_, op] of operators) {
-      op.socket.emit("incomingMessage", {
-        from: socket.id,
-        message: data.message,
-      });
+    if (data.type === "image" && data.image) {
+      console.log(
+        "🖼️ Imagen del cliente:",
+        socket.id,
+        data.name,
+        data.mimeType,
+        data.size,
+      );
+
+      // reenviar a todos los operadores
+      for (const [_, op] of operators) {
+        op.socket.emit("incomingMessage", {
+          from: socket.id,
+          type: "image",
+          image: data.image, // data URL (data:image/png;base64,...)
+          name: data.name,
+          mimeType: data.mimeType,
+          size: data.size,
+        });
+      }
+    } else {
+      const msg = data.message ?? "";
+      console.log("💬 Mensaje cliente:", msg);
+
+      for (const [_, op] of operators) {
+        op.socket.emit("incomingMessage", {
+          from: socket.id,
+          type: "text",
+          message: msg,
+        });
+      }
     }
   });
 
+  // 👉 Mensaje que viene del OPERADOR (texto o imagen)
   socket.on("operatorMessage", (data) => {
     const target = clients.get(data.to);
-    if (target) {
+    if (!target) return;
+
+    if (data.type === "image" && data.image) {
+      console.log(
+        "🖼️ Imagen del operador para:",
+        data.to,
+        data.name,
+        data.mimeType,
+      );
+
       target.socket.emit("serverMessage", {
+        type: "image",
+        image: data.image,
+        name: data.name,
+        mimeType: data.mimeType,
+      });
+    } else {
+      console.log("💬 Mensaje operador →", data.to, ":", data.message);
+
+      target.socket.emit("serverMessage", {
+        type: "text",
         message: data.message,
       });
     }
