@@ -78,30 +78,32 @@ io.on("connection", (socket) => {
         data.name,
         data.mimeType,
         data.size,
+        "| base64 length:",
+        data.image.length,
       );
 
-      // reenviar a todos los operadores
       for (const [, op] of operators) {
         op.socket.emit("incomingMessage", {
           from: socket.id,
           type: "image",
-          image: data.image, // data URL (data:image/png;base64,...)
+          image: data.image,
           name: data.name,
           mimeType: data.mimeType,
           size: data.size,
         });
       }
-    } else {
-      const msg = data.message ?? "";
-      console.log("💬 Mensaje cliente:", socket.id, "→", msg);
+      return;
+    }
 
-      for (const [, op] of operators) {
-        op.socket.emit("incomingMessage", {
-          from: socket.id,
-          type: "text",
-          message: msg,
-        });
-      }
+    const msg = data.message ?? "";
+    console.log("💬 Mensaje cliente:", socket.id, "→", msg);
+
+    for (const [, op] of operators) {
+      op.socket.emit("incomingMessage", {
+        from: socket.id,
+        type: "text",
+        message: msg,
+      });
     }
   });
 
