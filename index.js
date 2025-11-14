@@ -23,10 +23,12 @@ const io = new Server(server, {
   },
   path: "/chat",
   transports: ["websocket", "polling"],
-
   // 🔧 Tunear heartbeats para conexiones inestables / hosting
   pingInterval: 25000, // cada 25s manda ping
   pingTimeout: 60000, // espera hasta 60s antes de dar por muerto al cliente
+
+  // 👇 AUMENTAR TAMAÑO MÁXIMO DEL PAYLOAD (por defecto: 1 MB)
+  maxHttpBufferSize: 10 * 1024 * 1024, // 10 MB
 });
 
 const clients = new Map(); // client.id → { socket, username }
