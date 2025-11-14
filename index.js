@@ -5,12 +5,28 @@ import { Server } from "socket.io";
 import cors from "cors";
 
 const app = express();
-app.use(cors());
+
+// CORS para API REST (si la usás)
+app.use(
+  cors({
+    origin: "*", // o tu dominio/lading real
+    methods: ["GET", "POST"],
+  }),
+);
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*" },
+  cors: {
+    origin: "*", // o ["https://tu-dominio.com"]
+    methods: ["GET", "POST"],
+  },
   path: "/chat",
+  transports: ["websocket", "polling"],
+
+  // 🔧 Tunear heartbeats para conexiones inestables / hosting
+  pingInterval: 25000, // cada 25s manda ping
+  pingTimeout: 60000, // espera hasta 60s antes de dar por muerto al cliente
 });
 
 const clients = new Map(); // client.id → { socket, username }
@@ -20,33 +36,39 @@ io.on("connection", (socket) => {
   console.log("🟢 Nueva conexión:", socket.id);
 
   socket.on("join", (data) => {
-    if (data.role === "operator") {
+    if (data?.role === "operator") {
+      // 👨‍💼 Operador
       operators.set(socket.id, { socket, name: data.name || "Operador" });
-      console.log(`👨‍💼 Operador conectado: ${data.name}`);
+      console.log(`👨‍💼 Operador conectado: ${data.name || "Operador"}`);
+
       socket.emit("serverMessage", {
         type: "text",
         message: "Conectado como operador ✅",
       });
     } else {
-      clients.set(socket.id, { socket, username: data.user || "Anon" });
-      console.log(`🙋 Cliente conectado: ${data.user}`);
+      // 🙋 Cliente
+      const username = data?.user || "Anon";
+      clients.set(socket.id, { socket, username });
+
+      console.log(`🙋 Cliente conectado: ${username} (socket: ${socket.id})`);
+
       socket.emit("serverMessage", {
         type: "text",
         message: "¡Bienvenido al chat de Ganamos!",
       });
 
       // Notificar a los operadores del nuevo chat
-      for (const [_, op] of operators) {
+      for (const [, op] of operators) {
         op.socket.emit("newChat", {
           clientId: socket.id,
-          username: data.user,
+          username,
         });
       }
     }
   });
 
   // 👉 Mensaje que viene del CLIENTE (texto o imagen)
-  socket.on("clientMessage", (data) => {
+  socket.on("clientMessage", (data = {}) => {
     if (data.type === "image" && data.image) {
       console.log(
         "🖼️ Imagen del cliente:",
@@ -57,7 +79,7 @@ io.on("connection", (socket) => {
       );
 
       // reenviar a todos los operadores
-      for (const [_, op] of operators) {
+      for (const [, op] of operators) {
         op.socket.emit("incomingMessage", {
           from: socket.id,
           type: "image",
@@ -69,9 +91,9 @@ io.on("connection", (socket) => {
       }
     } else {
       const msg = data.message ?? "";
-      console.log("💬 Mensaje cliente:", msg);
+      console.log("💬 Mensaje cliente:", socket.id, "→", msg);
 
-      for (const [_, op] of operators) {
+      for (const [, op] of operators) {
         op.socket.emit("incomingMessage", {
           from: socket.id,
           type: "text",
@@ -82,9 +104,12 @@ io.on("connection", (socket) => {
   });
 
   // 👉 Mensaje que viene del OPERADOR (texto o imagen)
-  socket.on("operatorMessage", (data) => {
+  socket.on("operatorMessage", (data = {}) => {
     const target = clients.get(data.to);
-    if (!target) return;
+    if (!target) {
+      console.warn("⚠️ operatorMessage: cliente no encontrado:", data.to);
+      return;
+    }
 
     if (data.type === "image" && data.image) {
       console.log(
@@ -110,11 +135,31 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
-    clients.delete(socket.id);
-    operators.delete(socket.id);
-    console.log("🔴 Desconectado:", socket.id);
+  // 🧹 Cuando se desconecta alguien
+  socket.on("disconnect", (reason) => {
+    const wasClient = clients.delete(socket.id);
+    const wasOperator = operators.delete(socket.id);
+
+    console.log(
+      "🔴 Desconectado:",
+      socket.id,
+      "| era cliente:",
+      wasClient,
+      "| era operador:",
+      wasOperator,
+      "| razón:",
+      reason,
+    );
+  });
+
+  // (Opcional) ver si el servidor recibe errores raros
+  socket.on("error", (err) => {
+    console.error("⚠️ Socket error en", socket.id, ":", err);
   });
 });
 
-server.listen(8080, () => console.log("✅ Socket.IO server on port 8080"));
+// Para Render/Onrender normalmente usás process.env.PORT
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () =>
+  console.log(`✅ Socket.IO server listening on port ${PORT}`),
+);
