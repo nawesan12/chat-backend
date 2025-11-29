@@ -16,11 +16,15 @@ A production-ready Socket.IO backend for real-time chat with multi-operator sync
 - **Health Monitoring**: `/health` endpoint for container orchestration
 - **Metrics Endpoint**: `/metrics` for monitoring connections and messages
 - **Rate Limiting**: Configurable spam protection (can be disabled)
-- **Message Sanitization**: XSS protection for text messages
+- **Message Sanitization**: Advanced XSS and injection attack prevention
+- **Image Validation**: File type, size, and format validation
+- **Message Compression**: Per-message compression for bandwidth optimization
 - **Graceful Shutdown**: Proper cleanup on SIGTERM/SIGINT
 - **Environment Configuration**: Full `.env` support
 - **Docker Support**: Ready-to-deploy containers
 - **Comprehensive Logging**: Timestamped logs with severity levels
+- **Input Validation**: All incoming events are validated
+- **Error Handling**: Comprehensive error responses and logging
 
 ## Quick Start
 
@@ -88,10 +92,12 @@ All configuration is done via environment variables. See `.env.example` for all 
 | `NODE_ENV` | `development` | Environment mode |
 | `PORT` | `8080` | Server port |
 | `SOCKET_PATH` | `/chat` | WebSocket path |
-| `CORS_ORIGIN` | `*` | CORS allowed origins |
+| `CORS_ORIGIN` | `*` | CORS allowed origins (comma-separated) |
 | `PING_INTERVAL` | `25000` | Socket.IO ping interval (ms) |
 | `PING_TIMEOUT` | `60000` | Socket.IO ping timeout (ms) |
-| `MAX_BUFFER_SIZE` | `10485760` | Max message size (10MB) |
+| `UPGRADE_TIMEOUT` | `30000` | Socket.IO upgrade timeout (ms) |
+| `MAX_BUFFER_SIZE` | `104857600` | Max message buffer size (100MB) |
+| `MAX_IMAGE_SIZE` | `10485760` | Max image file size (10MB) |
 | `RATE_LIMIT_ENABLED` | `true` | Enable/disable rate limiting |
 | `RATE_LIMIT_MAX_MESSAGES` | `100` | Max messages per window |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window (ms) |
@@ -395,14 +401,33 @@ Client ← Message from Operator A
 ## Security Considerations
 
 ### Message Sanitization
-All text messages are sanitized to prevent XSS attacks:
-- HTML tags are stripped
-- Messages are limited to 5000 characters
+All text messages are sanitized to prevent XSS and injection attacks:
+- **HTML tags** are completely stripped (`<script>`, `<iframe>`, etc.)
+- **JavaScript protocols** are removed (`javascript:`, `data:`)
+- **Event handlers** are blocked (`onclick=`, `onerror=`, etc.)
+- **Dangerous characters** are filtered (`<`, `>`, `'`, `"`)
+- Messages are limited to **5000 characters**
+
+### Image Validation
+Images are validated before processing:
+- Must be valid **base64 data URLs**
+- Only allowed formats: **JPEG, PNG, GIF, WebP**
+- **File size limits** enforced (default 10MB)
+- **MIME type verification**
 
 ### Rate Limiting
 Configurable rate limiting prevents spam and DoS attacks:
-- Default: 100 messages per 60 seconds
+- Default: **100 messages per 60 seconds** per socket
+- Automatically resets after window expires
 - Can be adjusted or disabled via environment variables
+- Applies to both clients and operators
+
+### Input Validation
+All incoming events are validated:
+- **Required fields** are checked before processing
+- **Message types** are validated (`text` or `image` only)
+- **Role validation** on join (`operator` or `client`)
+- **Error messages** sent back on validation failures
 
 ### CORS Configuration
 Configure `CORS_ORIGIN` in production to limit allowed origins:
@@ -410,12 +435,24 @@ Configure `CORS_ORIGIN` in production to limit allowed origins:
 CORS_ORIGIN=https://yourdomain.com,https://admin.yourdomain.com
 ```
 
+### Production Security Checklist
+- [ ] Set specific `CORS_ORIGIN` (not `*`)
+- [ ] Enable rate limiting in production
+- [ ] Use environment variables for secrets
+- [ ] Deploy behind HTTPS/TLS
+- [ ] Implement operator authentication (JWT/session)
+- [ ] Set up logging and monitoring
+- [ ] Configure firewall rules
+- [ ] Regular security audits
+
 ### Future Security Enhancements
 Consider adding:
 - JWT authentication for operators
-- Session validation
+- Session validation with Redis
 - IP-based rate limiting
-- Message encryption
+- End-to-end message encryption
+- Operator permission levels
+- Audit logging for compliance
 
 ## Monitoring
 

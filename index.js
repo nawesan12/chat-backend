@@ -27,7 +27,14 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
   pingInterval: parseInt(process.env.PING_INTERVAL) || 25000,
   pingTimeout: parseInt(process.env.PING_TIMEOUT) || 60000,
-  maxHttpBufferSize: parseInt(process.env.MAX_BUFFER_SIZE) || 10 * 1024 * 1024,
+  upgradeTimeout: parseInt(process.env.UPGRADE_TIMEOUT) || 30000,
+  maxHttpBufferSize: parseInt(process.env.MAX_BUFFER_SIZE) || 100 * 1024 * 1024, // 100MB for images
+  // Enable compression for production performance
+  perMessageDeflate: {
+    threshold: 1024, // Only compress messages larger than 1KB
+  },
+  // Connection options
+  allowEIO3: true, // Allow Engine.IO v3 clients
 });
 
 // Data stores
@@ -70,13 +77,44 @@ function checkRateLimit(socketId) {
   return true;
 }
 
-// Helper: Sanitize message
+// Helper: Sanitize message (prevent XSS and injection attacks)
 function sanitizeMessage(message) {
   if (typeof message !== "string") return "";
+
+  // Remove HTML tags, scripts, and potentially dangerous characters
   return message
-    .replace(/[<>]/g, "")
-    .substring(0, 5000)
+    .replace(/<[^>]*>/g, "") // Remove HTML tags
+    .replace(/javascript:/gi, "") // Remove javascript: protocol
+    .replace(/on\w+\s*=/gi, "") // Remove event handlers like onclick=
+    .replace(/[<>'"]/g, "") // Remove dangerous characters
+    .substring(0, 5000) // Limit length
     .trim();
+}
+
+// Helper: Validate image data
+function validateImageData(data) {
+  if (!data.image || typeof data.image !== "string") {
+    return { valid: false, error: "Invalid image data" };
+  }
+
+  // Check if it's a valid base64 data URL
+  if (!data.image.startsWith("data:image/")) {
+    return { valid: false, error: "Image must be a data URL" };
+  }
+
+  // Validate MIME type
+  const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
+  if (!data.mimeType || !allowedMimeTypes.includes(data.mimeType.toLowerCase())) {
+    return { valid: false, error: "Invalid image type. Allowed: JPEG, PNG, GIF, WebP" };
+  }
+
+  // Check file size (limit to 10MB)
+  const maxSize = parseInt(process.env.MAX_IMAGE_SIZE) || 10 * 1024 * 1024;
+  if (data.size && data.size > maxSize) {
+    return { valid: false, error: `Image too large. Max size: ${maxSize / 1024 / 1024}MB` };
+  }
+
+  return { valid: true };
 }
 
 // Helper: Log with timestamp
@@ -130,31 +168,59 @@ io.on("connection", (socket) => {
   connectionMetrics.totalConnections++;
   log("info", "Nueva conexión:", socket.id);
 
-  // JOIN EVENT
+  // JOIN EVENT - Initial connection for operators and clients
   socket.on("join", (data) => {
-    const { role, name, operatorId, user } = data || {};
+    // Validate join data
+    if (!data) {
+      socket.emit("error", { message: "Join data is required" });
+      log("warning", `Join attempted without data: ${socket.id}`);
+      return;
+    }
+
+    const { role, name, operatorId, user } = data;
+
+    // Validate role
+    if (!role || !["operator", "client"].includes(role)) {
+      socket.emit("error", { message: "Invalid role. Must be 'operator' or 'client'" });
+      log("warning", `Invalid role attempted: ${role} from ${socket.id}`);
+      return;
+    }
 
     if (role === "operator") {
+      // Validate operator data
+      if (!operatorId || !name) {
+        socket.emit("error", { message: "Operator must provide operatorId and name" });
+        log("warning", `Operator join missing required fields: ${socket.id}`);
+        return;
+      }
+
+      // Store operator information
       operatorSockets.set(socket.id, {
         socketId: socket.id,
         operatorId: operatorId,
-        name: name || "Operador",
+        name: name,
       });
 
       connectionMetrics.activeOperators++;
-      log("success", `Operador conectado: ${name || "Operador"} (ID: ${operatorId})`);
+      log("success", `Operador conectado: ${name} (ID: ${operatorId})`);
 
+      // Confirm connection to operator
       socket.emit("serverMessage", {
         type: "text",
         message: "Conectado como operador",
+        timestamp: new Date().toISOString(),
       });
 
+      // Notify other operators about new operator
       socket.broadcast.emit("operatorConnected", {
         operatorId: operatorId,
-        name: name || "Operador",
+        name: name,
+        timestamp: new Date().toISOString(),
       });
     } else {
-      const username = user || "Anon";
+      // Client connection
+      const username = user || name || "Anónimo";
+
       clients.set(socket.id, {
         socket,
         username,
@@ -164,20 +230,25 @@ io.on("connection", (socket) => {
       connectionMetrics.activeClients++;
       log("success", `Cliente conectado: ${username} (socket: ${socket.id})`);
 
+      // Confirm connection to client
       socket.emit("serverMessage", {
         type: "text",
         message: "Bienvenido al chat",
+        timestamp: new Date().toISOString(),
       });
 
+      // Notify ALL operators about new client
       socket.broadcast.emit("newChat", {
         clientId: socket.id,
         username,
+        timestamp: new Date().toISOString(),
       });
     }
   });
 
-  // CLIENT MESSAGE
+  // CLIENT MESSAGE - Client sends message to operators
   socket.on("clientMessage", (data = {}) => {
+    // Rate limiting
     if (!checkRateLimit(socket.id)) {
       socket.emit("rateLimitExceeded", {
         message: "Demasiados mensajes. Por favor, espera un momento.",
@@ -186,12 +257,27 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Validate message type
+    if (!data.type || !["text", "image"].includes(data.type)) {
+      socket.emit("error", { message: "Invalid message type" });
+      return;
+    }
+
     connectionMetrics.messagesProcessed++;
 
-    if (data.type === "image" && data.image) {
+    if (data.type === "image") {
+      // Validate image data
+      const validation = validateImageData(data);
+      if (!validation.valid) {
+        socket.emit("error", { message: validation.error });
+        log("warning", `Invalid image from client ${socket.id}: ${validation.error}`);
+        return;
+      }
+
       log("info", `Imagen del cliente: ${socket.id} | ${data.name} | ${data.mimeType}`);
 
-      io.emit("incomingMessage", {
+      // Broadcast to ALL operators only (not back to the client)
+      socket.broadcast.emit("incomingMessage", {
         from: socket.id,
         type: "image",
         image: data.image,
@@ -201,10 +287,22 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     } else {
-      const sanitized = sanitizeMessage(data.message);
-      log("info", `Mensaje cliente: ${socket.id} → ${sanitized}`);
+      // Validate text message
+      if (!data.message || typeof data.message !== "string") {
+        socket.emit("error", { message: "Invalid text message" });
+        return;
+      }
 
-      io.emit("incomingMessage", {
+      const sanitized = sanitizeMessage(data.message);
+      if (!sanitized) {
+        socket.emit("error", { message: "Message cannot be empty" });
+        return;
+      }
+
+      log("info", `Mensaje cliente: ${socket.id} → ${sanitized.substring(0, 50)}...`);
+
+      // Broadcast to ALL operators only (not back to the client)
+      socket.broadcast.emit("incomingMessage", {
         from: socket.id,
         type: "text",
         message: sanitized,
@@ -213,8 +311,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  // OPERATOR MESSAGE
+  // OPERATOR MESSAGE - Operator sends message to client
   socket.on("operatorMessage", (data = {}) => {
+    // Rate limiting
     if (!checkRateLimit(socket.id)) {
       socket.emit("rateLimitExceeded", {
         message: "Demasiados mensajes. Por favor, espera un momento.",
@@ -225,6 +324,19 @@ io.on("connection", (socket) => {
 
     const { to, type, message, image, name, mimeType, size, operatorId, operatorName } = data;
 
+    // Validate required fields
+    if (!to || !type || !operatorId || !operatorName) {
+      socket.emit("error", { message: "Missing required fields: to, type, operatorId, operatorName" });
+      return;
+    }
+
+    // Validate message type
+    if (!["text", "image"].includes(type)) {
+      socket.emit("error", { message: "Invalid message type" });
+      return;
+    }
+
+    // Check if target client exists
     const targetClient = clients.get(to);
     if (!targetClient) {
       log("warning", `Cliente no encontrado: ${to}`);
@@ -234,9 +346,18 @@ io.on("connection", (socket) => {
 
     connectionMetrics.messagesProcessed++;
 
-    if (type === "image" && image) {
+    if (type === "image") {
+      // Validate image data
+      const validation = validateImageData({ image, mimeType, size });
+      if (!validation.valid) {
+        socket.emit("error", { message: validation.error });
+        log("warning", `Invalid image from operator ${operatorName}: ${validation.error}`);
+        return;
+      }
+
       log("info", `Imagen del operador ${operatorName} para: ${to}`);
 
+      // Send to specific client
       io.to(to).emit("incomingOperatorMessage", {
         from: socket.id,
         type: "image",
@@ -245,35 +366,59 @@ io.on("connection", (socket) => {
         mimeType: mimeType,
         timestamp: new Date().toISOString(),
       });
-    } else {
-      const sanitized = sanitizeMessage(message);
-      log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized}`);
 
+      // Broadcast to other operators for supervision
+      socket.broadcast.emit("operatorMessageBroadcast", {
+        clientId: to,
+        message: {
+          from: "operator",
+          image: image,
+          mimeType: mimeType,
+          name: name,
+          timestamp: new Date().toISOString(),
+          operatorId: operatorId,
+          operatorName: operatorName,
+        },
+        operatorId: operatorId,
+        operatorName: operatorName,
+      });
+    } else {
+      // Validate text message
+      if (!message || typeof message !== "string") {
+        socket.emit("error", { message: "Invalid text message" });
+        return;
+      }
+
+      const sanitized = sanitizeMessage(message);
+      if (!sanitized) {
+        socket.emit("error", { message: "Message cannot be empty" });
+        return;
+      }
+
+      log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized.substring(0, 50)}...`);
+
+      // Send to specific client
       io.to(to).emit("incomingOperatorMessage", {
         from: socket.id,
         type: "text",
         message: sanitized,
         timestamp: new Date().toISOString(),
       });
+
+      // Broadcast to other operators for supervision
+      socket.broadcast.emit("operatorMessageBroadcast", {
+        clientId: to,
+        message: {
+          from: "operator",
+          text: sanitized,
+          timestamp: new Date().toISOString(),
+          operatorId: operatorId,
+          operatorName: operatorName,
+        },
+        operatorId: operatorId,
+        operatorName: operatorName,
+      });
     }
-
-    const messageForOperators = {
-      from: "operator",
-      text: type === "text" ? sanitizeMessage(message) : undefined,
-      image: type === "image" ? image : undefined,
-      mimeType: type === "image" ? mimeType : undefined,
-      name: type === "image" ? name : undefined,
-      timestamp: new Date().toISOString(),
-      operatorId: operatorId,
-      operatorName: operatorName,
-    };
-
-    socket.broadcast.emit("operatorMessageBroadcast", {
-      clientId: to,
-      message: messageForOperators,
-      operatorId: operatorId,
-      operatorName: operatorName,
-    });
 
     log("debug", `Mensaje de ${operatorName} transmitido a otros operadores`);
   });
@@ -295,7 +440,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // GET CONNECTED OPERATORS
+  // GET CONNECTED OPERATORS - List all currently connected operators
   socket.on("getConnectedOperators", () => {
     const operators = Array.from(operatorSockets.values()).map((op) => ({
       operatorId: op.operatorId,
@@ -303,6 +448,29 @@ io.on("connection", (socket) => {
     }));
 
     socket.emit("connectedOperatorsList", operators);
+    log("debug", `Operator list sent to ${socket.id}: ${operators.length} operators online`);
+  });
+
+  // CHAT ENDED - Client explicitly ends the conversation
+  socket.on("chatEnded", () => {
+    const clientId = socket.id;
+    const client = clients.get(clientId);
+
+    if (client) {
+      log("info", `Chat ended by client: ${client.username} (${clientId})`);
+
+      // Notify all operators
+      socket.broadcast.emit("chatEnded", {
+        clientId: clientId,
+        username: client.username,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Clean up client data
+      clients.delete(clientId);
+      messageRateLimiter.delete(clientId);
+      connectionMetrics.activeClients = Math.max(0, connectionMetrics.activeClients - 1);
+    }
   });
 
   // DISCONNECT
