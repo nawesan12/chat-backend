@@ -538,9 +538,12 @@ chat-backend/
 - Adjust `RATE_LIMIT_MAX_MESSAGES` and `RATE_LIMIT_WINDOW_MS`
 - Or disable completely with `RATE_LIMIT_ENABLED=false`
 
-## Implementation Guide
+## Implementation Guides
 
-For detailed implementation instructions and frontend integration, see [IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md).
+### Frontend Integration
+
+- **[CLIENT_IMPLEMENTATION_GUIDE.md](./CLIENT_IMPLEMENTATION_GUIDE.md)** - Complete guide for implementing the customer-facing chat widget (for end-users)
+- **[IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md)** - Backend setup and operator interface implementation (for support teams)
 
 ## Contributing
 
