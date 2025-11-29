@@ -367,6 +367,10 @@ io.on("connection", (socket) => {
 
     connectionMetrics.messagesProcessed++;
 
+    // Get all other operators (excluding sender) - declare once for both branches
+    const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
+    const timestamp = new Date().toISOString();
+
     if (type === "image") {
       // Validate image data
       const validation = validateImageData({ image, mimeType, size });
@@ -377,8 +381,6 @@ io.on("connection", (socket) => {
       }
 
       log("info", `Imagen del operador ${operatorName} para: ${to}`);
-
-      const timestamp = new Date().toISOString();
 
       // Send to specific client (matching instruction.md)
       io.to(to).emit("operatorMessage", {
@@ -391,7 +393,6 @@ io.on("connection", (socket) => {
       });
 
       // Broadcast to ALL OTHER operators (excluding sender)
-      const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
       otherOperators.forEach(opSocketId => {
         io.to(opSocketId).emit("operatorBroadcast", {
           clientId: to,
@@ -419,8 +420,6 @@ io.on("connection", (socket) => {
 
       log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized.substring(0, 50)}...`);
 
-      const timestamp = new Date().toISOString();
-
       // Send to specific client (matching instruction.md)
       io.to(to).emit("operatorMessage", {
         type: "text",
@@ -430,7 +429,6 @@ io.on("connection", (socket) => {
       });
 
       // Broadcast to ALL OTHER operators (excluding sender)
-      const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
       otherOperators.forEach(opSocketId => {
         io.to(opSocketId).emit("operatorBroadcast", {
           clientId: to,
