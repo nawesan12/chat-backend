@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  chat-backend:
+    build: .
+    container_name: chat-backend
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=8080
+      - SOCKET_PATH=${SOCKET_PATH:-/chat}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      - PING_INTERVAL=${PING_INTERVAL:-25000}
+      - PING_TIMEOUT=${PING_TIMEOUT:-60000}
+      - MAX_BUFFER_SIZE=${MAX_BUFFER_SIZE:-10485760}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_MAX_MESSAGES=${RATE_LIMIT_MAX_MESSAGES:-100}
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-60000}
+    networks:
+      - chat-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Redis for multi-server support
+  # Uncomment to enable Redis
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: chat-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - chat-network
+  #   command: redis-server --appendonly yes
+
+networks:
+  chat-network:
+    driver: bridge
+
+# volumes:
+#   redis-data:
