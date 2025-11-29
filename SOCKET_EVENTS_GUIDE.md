@@ -843,6 +843,142 @@ socket.on('chatEnded', (data) => {
 
 ---
 
+## Multi-Operator Sync (IMPORTANT!)
+
+### Problem: Operators Can't See Each Other's Messages
+
+If operators working on the same client chat can't see each other's messages in real-time, you need to handle the `operatorBroadcast` event properly.
+
+### Solution: Listen to `operatorBroadcast`
+
+```javascript
+// In your operator chat interface
+socket.on('operatorBroadcast', (data) => {
+  console.log(`${data.operatorName} sent to client ${data.clientId}:`, data.message);
+
+  // Find the chat for this client in your UI
+  const chatWindow = findChatByClientId(data.clientId);
+
+  if (chatWindow) {
+    // Add the message to the chat history
+    chatWindow.addMessage({
+      id: generateMessageId(),
+      type: data.type,
+      message: data.message,
+      image: data.image,
+      name: data.name,
+      mimeType: data.mimeType,
+      timestamp: data.timestamp,
+      sender: 'operator',
+      operatorId: data.operatorId,
+      operatorName: data.operatorName,
+      isFromMe: false  // Important: mark as not from current user
+    });
+
+    // Optional: Show notification
+    if (!chatWindow.isActive) {
+      showNotification(`${data.operatorName} replied to ${chatWindow.clientName}`);
+    }
+  }
+});
+```
+
+### React Example
+
+```javascript
+useEffect(() => {
+  // Handle messages from other operators
+  socket.on('operatorBroadcast', (data) => {
+    setChats(prevChats => {
+      const updatedChats = { ...prevChats };
+      const chat = updatedChats[data.clientId];
+
+      if (chat) {
+        chat.messages.push({
+          id: Date.now(),
+          type: data.type,
+          content: data.message || data.image,
+          mimeType: data.mimeType,
+          filename: data.name,
+          timestamp: data.timestamp,
+          sender: 'operator',
+          operatorName: data.operatorName,
+          operatorId: data.operatorId,
+          isFromCurrentOperator: false
+        });
+      }
+
+      return updatedChats;
+    });
+  });
+
+  return () => {
+    socket.off('operatorBroadcast');
+  };
+}, []);
+```
+
+### Vue Example
+
+```javascript
+mounted() {
+  this.socket.on('operatorBroadcast', (data) => {
+    const chat = this.activeChats.find(c => c.clientId === data.clientId);
+
+    if (chat) {
+      chat.messages.push({
+        id: Date.now(),
+        type: data.type,
+        content: data.message || data.image,
+        timestamp: data.timestamp,
+        fromOperator: true,
+        operatorName: data.operatorName,
+        isMe: false
+      });
+
+      // Auto-scroll to bottom
+      this.$nextTick(() => {
+        this.scrollToBottom(data.clientId);
+      });
+    }
+  });
+},
+
+beforeDestroy() {
+  this.socket.off('operatorBroadcast');
+}
+```
+
+### Display Differentiation
+
+Make sure to visually differentiate messages in the UI:
+
+```css
+/* Your own messages */
+.message.from-me {
+  background-color: #0084ff;
+  color: white;
+  align-self: flex-end;
+}
+
+/* Messages from other operators */
+.message.from-other-operator {
+  background-color: #e8e8e8;
+  color: #333;
+  align-self: flex-start;
+  border-left: 3px solid #ffa500;
+}
+
+/* Messages from clients */
+.message.from-client {
+  background-color: #f0f0f0;
+  color: #333;
+  align-self: flex-start;
+}
+```
+
+---
+
 ## Common Pitfalls
 
 1. ❌ **Sending messages before joining**
@@ -865,6 +1001,9 @@ socket.on('chatEnded', (data) => {
 
 7. ❌ **Hardcoding socket URLs**
    - ✅ Use environment variables for URLs and paths
+
+8. ❌ **Not listening to `operatorBroadcast`**
+   - ✅ Listen to this event to see messages from other operators in real-time
 
 ---
 

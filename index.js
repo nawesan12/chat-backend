@@ -378,6 +378,8 @@ io.on("connection", (socket) => {
 
       log("info", `Imagen del operador ${operatorName} para: ${to}`);
 
+      const timestamp = new Date().toISOString();
+
       // Send to specific client (matching instruction.md)
       io.to(to).emit("operatorMessage", {
         type: "image",
@@ -385,19 +387,22 @@ io.on("connection", (socket) => {
         name: name,
         mimeType: mimeType,
         operatorName: operatorName,
-        timestamp: new Date().toISOString(),
+        timestamp: timestamp,
       });
 
-      // Broadcast to other operators for supervision (matching instruction.md)
-      socket.broadcast.emit("operatorBroadcast", {
-        clientId: to,
-        operatorId: operatorId,
-        operatorName: operatorName,
-        type: "image",
-        image: image,
-        name: name,
-        mimeType: mimeType,
-        timestamp: new Date().toISOString(),
+      // Broadcast to ALL OTHER operators (excluding sender)
+      const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
+      otherOperators.forEach(opSocketId => {
+        io.to(opSocketId).emit("operatorBroadcast", {
+          clientId: to,
+          operatorId: operatorId,
+          operatorName: operatorName,
+          type: "image",
+          image: image,
+          name: name,
+          mimeType: mimeType,
+          timestamp: timestamp,
+        });
       });
     } else {
       // Validate text message
@@ -414,26 +419,31 @@ io.on("connection", (socket) => {
 
       log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized.substring(0, 50)}...`);
 
+      const timestamp = new Date().toISOString();
+
       // Send to specific client (matching instruction.md)
       io.to(to).emit("operatorMessage", {
         type: "text",
         message: sanitized,
         operatorName: operatorName,
-        timestamp: new Date().toISOString(),
+        timestamp: timestamp,
       });
 
-      // Broadcast to other operators for supervision (matching instruction.md)
-      socket.broadcast.emit("operatorBroadcast", {
-        clientId: to,
-        operatorId: operatorId,
-        operatorName: operatorName,
-        type: "text",
-        message: sanitized,
-        timestamp: new Date().toISOString(),
+      // Broadcast to ALL OTHER operators (excluding sender)
+      const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
+      otherOperators.forEach(opSocketId => {
+        io.to(opSocketId).emit("operatorBroadcast", {
+          clientId: to,
+          operatorId: operatorId,
+          operatorName: operatorName,
+          type: "text",
+          message: sanitized,
+          timestamp: timestamp,
+        });
       });
     }
 
-    log("debug", `Mensaje de ${operatorName} transmitido a otros operadores`);
+    log("debug", `Mensaje de ${operatorName} transmitido a ${otherOperators.length} otros operadores`);
   });
 
   // OPERATOR TYPING INDICATOR
