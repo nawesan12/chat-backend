@@ -144,7 +144,35 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Metrics endpoint
+// Stats endpoint (matching instruction.md)
+app.get("/stats", (req, res) => {
+  const clientList = Array.from(clients.entries()).map(([id, conn]) => ({
+    socketId: id,
+    name: conn.username,
+    username: conn.username,
+    connectedAt: conn.connectedAt,
+  }));
+
+  const operatorList = Array.from(operatorSockets.entries()).map(([id, conn]) => ({
+    socketId: id,
+    name: conn.name,
+    operatorId: conn.operatorId,
+    connectedAt: conn.connectedAt || new Date().toISOString(),
+  }));
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    summary: {
+      totalConnections: connectionMetrics.totalConnections,
+      totalClients: clientList.length,
+      totalOperators: operatorList.length,
+    },
+    clients: clientList,
+    operators: operatorList,
+  });
+});
+
+// Additional metrics endpoint (keeping for backwards compatibility)
 app.get("/metrics", (req, res) => {
   res.json({
     connections: {
@@ -199,49 +227,42 @@ io.on("connection", (socket) => {
         socketId: socket.id,
         operatorId: operatorId,
         name: name,
+        connectedAt: new Date().toISOString(),
       });
 
       connectionMetrics.activeOperators++;
       log("success", `Operador conectado: ${name} (ID: ${operatorId})`);
 
-      // Confirm connection to operator
-      socket.emit("serverMessage", {
-        type: "text",
-        message: "Conectado como operador",
-        timestamp: new Date().toISOString(),
+      // Send list of all active clients to this operator (matching instruction.md)
+      clients.forEach((client, clientId) => {
+        socket.emit("newChat", {
+          clientId: clientId,
+          username: client.username,
+          phone: client.phone,
+        });
       });
 
-      // Notify other operators about new operator
-      socket.broadcast.emit("operatorConnected", {
-        operatorId: operatorId,
-        name: name,
-        timestamp: new Date().toISOString(),
-      });
+      log("info", `Sent ${clients.size} active clients to operator ${name}`);
     } else {
       // Client connection
-      const username = user || name || "Anónimo";
+      const username = data.username || user || name || "Anónimo";
+      const phone = data.phone;
 
       clients.set(socket.id, {
         socket,
         username,
+        phone,
         connectedAt: new Date().toISOString(),
       });
 
       connectionMetrics.activeClients++;
       log("success", `Cliente conectado: ${username} (socket: ${socket.id})`);
 
-      // Confirm connection to client
-      socket.emit("serverMessage", {
-        type: "text",
-        message: "Bienvenido al chat",
-        timestamp: new Date().toISOString(),
-      });
-
-      // Notify ALL operators about new client
+      // Notify ALL operators about new client (matching instruction.md)
       socket.broadcast.emit("newChat", {
         clientId: socket.id,
         username,
-        timestamp: new Date().toISOString(),
+        phone,
       });
     }
   });
@@ -357,30 +378,26 @@ io.on("connection", (socket) => {
 
       log("info", `Imagen del operador ${operatorName} para: ${to}`);
 
-      // Send to specific client
-      io.to(to).emit("incomingOperatorMessage", {
-        from: socket.id,
+      // Send to specific client (matching instruction.md)
+      io.to(to).emit("operatorMessage", {
+        type: "image",
+        image: image,
+        name: name,
+        mimeType: mimeType,
+        operatorName: operatorName,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Broadcast to other operators for supervision (matching instruction.md)
+      socket.broadcast.emit("operatorBroadcast", {
+        clientId: to,
+        operatorId: operatorId,
+        operatorName: operatorName,
         type: "image",
         image: image,
         name: name,
         mimeType: mimeType,
         timestamp: new Date().toISOString(),
-      });
-
-      // Broadcast to other operators for supervision
-      socket.broadcast.emit("operatorMessageBroadcast", {
-        clientId: to,
-        message: {
-          from: "operator",
-          image: image,
-          mimeType: mimeType,
-          name: name,
-          timestamp: new Date().toISOString(),
-          operatorId: operatorId,
-          operatorName: operatorName,
-        },
-        operatorId: operatorId,
-        operatorName: operatorName,
       });
     } else {
       // Validate text message
@@ -397,26 +414,22 @@ io.on("connection", (socket) => {
 
       log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized.substring(0, 50)}...`);
 
-      // Send to specific client
-      io.to(to).emit("incomingOperatorMessage", {
-        from: socket.id,
+      // Send to specific client (matching instruction.md)
+      io.to(to).emit("operatorMessage", {
         type: "text",
         message: sanitized,
+        operatorName: operatorName,
         timestamp: new Date().toISOString(),
       });
 
-      // Broadcast to other operators for supervision
-      socket.broadcast.emit("operatorMessageBroadcast", {
+      // Broadcast to other operators for supervision (matching instruction.md)
+      socket.broadcast.emit("operatorBroadcast", {
         clientId: to,
-        message: {
-          from: "operator",
-          text: sanitized,
-          timestamp: new Date().toISOString(),
-          operatorId: operatorId,
-          operatorName: operatorName,
-        },
         operatorId: operatorId,
         operatorName: operatorName,
+        type: "text",
+        message: sanitized,
+        timestamp: new Date().toISOString(),
       });
     }
 
@@ -451,29 +464,33 @@ io.on("connection", (socket) => {
     log("debug", `Operator list sent to ${socket.id}: ${operators.length} operators online`);
   });
 
-  // CHAT ENDED - Client explicitly ends the conversation
-  socket.on("chatEnded", () => {
-    const clientId = socket.id;
-    const client = clients.get(clientId);
+  // END CHAT - Either party can end the conversation (matching instruction.md)
+  socket.on("endChat", (data = {}) => {
+    const user = operatorSockets.get(socket.id) || clients.get(socket.id);
+    if (!user) return;
 
-    if (client) {
-      log("info", `Chat ended by client: ${client.username} (${clientId})`);
+    const isOperator = operatorSockets.has(socket.id);
+    const clientId = isOperator ? data.clientId : socket.id;
 
-      // Notify all operators
-      socket.broadcast.emit("chatEnded", {
-        clientId: clientId,
-        username: client.username,
-        timestamp: new Date().toISOString(),
+    if (!clientId) return;
+
+    log("info", `Chat ended by ${isOperator ? 'operator' : 'client'}: ${clientId}`);
+
+    // Notify all operators
+    const operatorSocketIds = Array.from(operatorSockets.keys());
+    operatorSocketIds.forEach(opSocketId => {
+      io.to(opSocketId).emit("chatEnded", { clientId });
+    });
+
+    // If operator initiated, notify the client
+    if (isOperator) {
+      io.to(clientId).emit("chatEnded", {
+        message: "El operador ha finalizado la conversación"
       });
-
-      // Clean up client data
-      clients.delete(clientId);
-      messageRateLimiter.delete(clientId);
-      connectionMetrics.activeClients = Math.max(0, connectionMetrics.activeClients - 1);
     }
   });
 
-  // DISCONNECT
+  // DISCONNECT (matching instruction.md)
   socket.on("disconnect", (reason) => {
     const operator = operatorSockets.get(socket.id);
 
@@ -481,19 +498,19 @@ io.on("connection", (socket) => {
       log("info", `Operador desconectado: ${operator.name} (Razón: ${reason})`);
       connectionMetrics.activeOperators = Math.max(0, connectionMetrics.activeOperators - 1);
       operatorSockets.delete(socket.id);
-
-      socket.broadcast.emit("operatorDisconnected", {
-        operatorId: operator.operatorId,
-        name: operator.name,
-      });
     } else if (clients.has(socket.id)) {
       const client = clients.get(socket.id);
       log("info", `Cliente desconectado: ${client?.username} (Razón: ${reason})`);
       connectionMetrics.activeClients = Math.max(0, connectionMetrics.activeClients - 1);
       clients.delete(socket.id);
 
-      socket.broadcast.emit("chatEnded", {
-        clientId: socket.id,
+      // Notify all operators that this client disconnected (matching instruction.md)
+      const operatorSocketIds = Array.from(operatorSockets.keys());
+      operatorSocketIds.forEach(opSocketId => {
+        io.to(opSocketId).emit("chatEnded", {
+          clientId: socket.id,
+          reason: "disconnect"
+        });
       });
     }
 
