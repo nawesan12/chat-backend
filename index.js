@@ -41,12 +41,21 @@ const io = new Server(server, {
 const clients = new Map();
 const operatorSockets = new Map();
 const messageRateLimiter = new Map();
+const pendingMessages = new Map(); // clientId -> array of pending messages
 const connectionMetrics = {
   totalConnections: 0,
   activeClients: 0,
   activeOperators: 0,
   messagesProcessed: 0,
   startTime: new Date(),
+};
+
+// Operator status enum
+const OperatorStatus = {
+  ONLINE: "online",
+  AWAY: "away",
+  BUSY: "busy",
+  OFFLINE: "offline",
 };
 
 // Helper: Check rate limit (configurable via env)
@@ -227,6 +236,7 @@ io.on("connection", (socket) => {
         socketId: socket.id,
         operatorId: operatorId,
         name: name,
+        status: OperatorStatus.ONLINE,
         connectedAt: new Date().toISOString(),
       });
 
@@ -264,6 +274,22 @@ io.on("connection", (socket) => {
         username,
         phone,
       });
+
+      // Send any pending messages to the client
+      const pending = pendingMessages.get(socket.id);
+      if (pending && pending.length > 0) {
+        log("info", `Sending ${pending.length} pending messages to client ${socket.id}`);
+        pending.forEach((msg) => {
+          socket.emit("operatorMessage", msg);
+          // Mark as delivered
+          socket.emit("messageDelivered", {
+            messageId: msg.messageId,
+            timestamp: new Date().toISOString(),
+          });
+        });
+        // Clear pending messages
+        pendingMessages.delete(socket.id);
+      }
     }
   });
 
@@ -357,15 +383,14 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Check if target client exists
+    // Check if target client exists (online or offline)
     const targetClient = clients.get(to);
-    if (!targetClient) {
-      log("warning", `Cliente no encontrado: ${to}`);
-      socket.emit("error", { message: "Cliente no encontrado" });
-      return;
-    }
+    const isClientOnline = !!targetClient;
 
     connectionMetrics.messagesProcessed++;
+
+    // Generate unique message ID for delivery tracking
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
     // Get all other operators (excluding sender) - declare once for both branches
     const otherOperators = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
@@ -382,15 +407,36 @@ io.on("connection", (socket) => {
 
       log("info", `Imagen del operador ${operatorName} para: ${to}`);
 
-      // Send to specific client (matching instruction.md)
-      io.to(to).emit("operatorMessage", {
+      const imageMessage = {
+        messageId: messageId,
         type: "image",
         image: image,
         name: name,
         mimeType: mimeType,
         operatorName: operatorName,
+        operatorId: operatorId,
         timestamp: timestamp,
-      });
+      };
+
+      // Send to specific client if online, otherwise queue
+      if (isClientOnline) {
+        io.to(to).emit("operatorMessage", imageMessage);
+        log("debug", `Image message ${messageId} sent to online client ${to}`);
+      } else {
+        // Queue message for offline client
+        if (!pendingMessages.has(to)) {
+          pendingMessages.set(to, []);
+        }
+        pendingMessages.get(to).push(imageMessage);
+        log("info", `Image message ${messageId} queued for offline client ${to}`);
+
+        // Notify operator that client is offline
+        socket.emit("messageQueued", {
+          messageId: messageId,
+          clientId: to,
+          reason: "Client offline - message will be delivered when they reconnect",
+        });
+      }
 
       // Broadcast to ALL OTHER operators (excluding sender)
       otherOperators.forEach(opSocketId => {
@@ -420,13 +466,34 @@ io.on("connection", (socket) => {
 
       log("info", `Mensaje operador ${operatorName} → ${to}: ${sanitized.substring(0, 50)}...`);
 
-      // Send to specific client (matching instruction.md)
-      io.to(to).emit("operatorMessage", {
+      const textMessage = {
+        messageId: messageId,
         type: "text",
         message: sanitized,
         operatorName: operatorName,
+        operatorId: operatorId,
         timestamp: timestamp,
-      });
+      };
+
+      // Send to specific client if online, otherwise queue
+      if (isClientOnline) {
+        io.to(to).emit("operatorMessage", textMessage);
+        log("debug", `Text message ${messageId} sent to online client ${to}`);
+      } else {
+        // Queue message for offline client
+        if (!pendingMessages.has(to)) {
+          pendingMessages.set(to, []);
+        }
+        pendingMessages.get(to).push(textMessage);
+        log("info", `Text message ${messageId} queued for offline client ${to}`);
+
+        // Notify operator that client is offline
+        socket.emit("messageQueued", {
+          messageId: messageId,
+          clientId: to,
+          reason: "Client offline - message will be delivered when they reconnect",
+        });
+      }
 
       // Broadcast to ALL OTHER operators (excluding sender)
       otherOperators.forEach(opSocketId => {
@@ -441,14 +508,27 @@ io.on("connection", (socket) => {
       });
     }
 
+    // Confirm message sent to the sender
+    socket.emit("messageSent", {
+      messageId: messageId,
+      clientId: to,
+      timestamp: timestamp,
+      queued: !isClientOnline,
+    });
+
     log("debug", `Mensaje de ${operatorName} transmitido a ${otherOperators.length} otros operadores`);
   });
 
   // OPERATOR TYPING INDICATOR
   socket.on("operatorTyping", (data) => {
-    if (data?.to) {
+    const operator = operatorSockets.get(socket.id);
+
+    if (data?.to && operator) {
+      // Send to client with operator name
       io.to(data.to).emit("operatorTyping", {
         isTyping: data.isTyping || false,
+        operatorName: operator.name,
+        operatorId: operator.operatorId,
       });
     }
   });
@@ -461,15 +541,94 @@ io.on("connection", (socket) => {
     });
   });
 
+  // MESSAGE DELIVERY ACKNOWLEDGMENT - Client confirms message received
+  socket.on("messageReceived", (data) => {
+    const { messageId } = data;
+    if (!messageId) return;
+
+    log("debug", `Client ${socket.id} acknowledged receipt of message ${messageId}`);
+
+    // Notify all operators that message was delivered
+    const operatorSocketIds = Array.from(operatorSockets.keys());
+    operatorSocketIds.forEach(opSocketId => {
+      io.to(opSocketId).emit("messageDelivered", {
+        messageId: messageId,
+        clientId: socket.id,
+        timestamp: new Date().toISOString(),
+      });
+    });
+  });
+
+  // MESSAGE READ - Client confirms message has been read/viewed
+  socket.on("messageRead", (data) => {
+    const { messageId } = data;
+    if (!messageId) return;
+
+    log("debug", `Client ${socket.id} marked message as read: ${messageId}`);
+
+    // Notify all operators that message was read
+    const operatorSocketIds = Array.from(operatorSockets.keys());
+    operatorSocketIds.forEach(opSocketId => {
+      io.to(opSocketId).emit("messageRead", {
+        messageId: messageId,
+        clientId: socket.id,
+        timestamp: new Date().toISOString(),
+      });
+    });
+  });
+
   // GET CONNECTED OPERATORS - List all currently connected operators
   socket.on("getConnectedOperators", () => {
     const operators = Array.from(operatorSockets.values()).map((op) => ({
       operatorId: op.operatorId,
       name: op.name,
+      status: op.status,
     }));
 
     socket.emit("connectedOperatorsList", operators);
     log("debug", `Operator list sent to ${socket.id}: ${operators.length} operators online`);
+  });
+
+  // OPERATOR STATUS CHANGE - Operator updates their availability status
+  socket.on("operatorStatusChange", (data) => {
+    const operator = operatorSockets.get(socket.id);
+    if (!operator) {
+      socket.emit("error", { message: "Only operators can change status" });
+      return;
+    }
+
+    const { status } = data;
+    const validStatuses = Object.values(OperatorStatus);
+
+    if (!status || !validStatuses.includes(status)) {
+      socket.emit("error", {
+        message: `Invalid status. Must be one of: ${validStatuses.join(", ")}`
+      });
+      return;
+    }
+
+    // Update operator status
+    operator.status = status;
+    operatorSockets.set(socket.id, operator);
+
+    log("info", `Operator ${operator.name} changed status to: ${status}`);
+
+    // Broadcast status change to all clients
+    socket.broadcast.emit("operatorStatusChanged", {
+      operatorId: operator.operatorId,
+      operatorName: operator.name,
+      status: status,
+    });
+
+    // Also broadcast to other operators
+    const operatorSocketIds = Array.from(operatorSockets.keys()).filter(id => id !== socket.id);
+    operatorSocketIds.forEach(opSocketId => {
+      io.to(opSocketId).emit("operatorStatusChanged", {
+        operatorId: operator.operatorId,
+        operatorName: operator.name,
+        status: status,
+      });
+    });
   });
 
   // END CHAT - Either party can end the conversation (matching instruction.md)
